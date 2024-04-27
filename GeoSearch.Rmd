@@ -1,0 +1,670 @@
+---
+title: "GeoSearch"
+output:
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load in the packages
+```{r}
+library("GEOsearch")
+library("GEOquery")
+```
+
+We will be using our data set created from SGs_list_and_IRES_list
+```{r}
+# To find aliases we will be using the package org.Hs.eg.db from BioConductor
+
+# Load the package
+library(org.Hs.eg.db)
+
+# Initialize an empty list to store results
+Terms <- list()
+
+# Iterate over shared_genes_GECKO
+for (i in shared_genes_GECKO) {
+    Terms[[i]] <- select(org.Hs.eg.db, keys = i, columns = "SYMBOL", keytype = "ALIAS")
+  }
+```
+
+
+Now we can search for all RNA-seq datasets from GEO using our genes and their aliases using the GEOSearchTerm() function.
+```{r}
+library("GEOsearch")
+
+# Initialize an empty list to store results
+Search <- list()
+
+# Iterate over Terms using GeoSearchTerm function. The function finds all data sets for our genes using all aliases. We need to add RNA-seq in the input to get RNA-seq data sets. Also, we will add a warning and an error function to handle possible errors and warnings that tend to happen to handful of genes.
+for (i in Terms) {
+  for (value in i$SYMBOL) {
+    tryCatch(
+      expr = {
+        Search[[value]] <- GEOSearchTerm(paste(value,"RNA-seq"))
+      },
+      warning = function(w) {
+        # Handle the warning, or choose to ignore it
+        cat("Warning for value:", value, " - ", w$message, "\n")
+      },
+      error = function(e) {
+        # Handle the error if needed
+        cat("Error for value:", value, " - ", e$message, "\n")
+      },
+      finally = {
+        # This block will be executed regardless of success or failure
+      }
+    )
+  }
+}
+
+```
+
+Now let's do some filtering. Let's only keep human and mice series
+```{r}
+library(dplyr)
+#clear previous merged_search list
+merged_search<-NULL
+# Merge all data frames into a single data frame
+merged_search <- bind_rows(Search)
+
+
+which(duplicated(merged_search$Series))
+```
+
+THIS CODE SNIPPET IS UNNECESSARY (if we do not want to inspect our merged_search further)
+```{r}
+# All the Term names
+Term_names <- unique(merged_search$Term)
+
+#Counts all instances of data sets for genes that contain homo sapiens, mus musculus or with other organisms
+Terms_Organism <- merged_search %>% 
+  filter(grepl("Homo sapiens|Mus musculus", Organism)) %>%
+  group_by(Term, Organism) %>%
+  summarise(count = n())
+
+# Counts all that do not contain any Homo sapiens or mus musculus
+Terms_Organism_Other <- merged_search %>% 
+  filter(!grepl("Homo sapiens|Mus musculus", Organism)) %>%
+  group_by(Term, Organism) %>%
+  summarise(count = n())
+
+
+# Create an empty list to store filtered data frames
+Search_filter <- list()
+
+# Iterate over each data frame in the Search list
+for (i in seq_along(Search)) {
+  # Filter each data frame for rows containing "Homo sapiens" or "Mus musculus"
+  filtered_df <- filter(Search[[i]], grepl("Homo sapiens|Mus musculus", Search[[i]]$Organism))
+  
+  # Assign the filtered data frame back to the list
+  Search_filter[[i]] <- filtered_df
+  
+  # Assign the name of the filtered data frame
+  names(Search_filter)[i] <- names(Search)[i]
+}
+```
+
+
+Now we can filter based on various keywords that capture knock down or knock out experiments in some ways
+```{r}
+# Loop through each title in the merged_search$Title column
+# Create an empty dataframe to store the filtered rows
+filtered_ms <- data.frame()
+
+# Loop through each title in the merged_search$Title column
+for (i in merged_search$Description) {
+  # Check if the description contains keywords that have to do with KD or KO, use ingore.case = TRUE since we do not care about case sensitivity
+  if (grepl("knock down|knock out|KD|KO|siRNA|shRNA|RNAi|knock-down|knock-out|knockdown|knockout|crispr", i, ignore.case = TRUE)) {
+    # Append the row where the condition is true to the filtered dataframe
+    filtered_ms <- rbind(filtered_ms, merged_search[merged_search$Description == i, ])
+  }
+}
+
+```
+
+
+```{r}
+#only include human and mice samples:
+filtered_ms_human_mice <- filtered_ms %>%
+  filter(grepl("Homo sapiens|Mus musculus", Organism))
+
+# How many genes are we left with after this filtering process?
+unique_values <- unique(filtered_ms_human_mice$Term)
+num_different_values <- length(unique_values)
+
+# Print the number of different values
+print(num_different_values)
+
+
+any(duplicated(filtered_ms_human_mice))
+
+# Identify duplicate rows based on the "Series" column
+duplicated_rows <- duplicated(filtered_ms_human_mice$Series) | duplicated(filtered_ms_human_mice$Series, fromLast = TRUE)
+
+# Subset the dataframe to retain only non-duplicate rows
+filtered_ms_human_mice_2 <- filtered_ms_human_mice[!duplicated_rows, ]
+
+
+
+```
+
+If we want we can make a csv file
+```{r}
+# Write the merged data frame to a CSV file
+write.csv(filtered_ms_human_mice, file = "search_geosearch.csv", row.names = FALSE)
+```
+
+
+1 Filter based on sample names
+2 Use AI to go through all possible FALSE negatives
+
+Now let's filter by using "Characteristics" from the samples, SampleDetail gives us access to the "Characteristics" of our samples. 
+```{r}
+#Let's find the samples
+sample_detail <- list()
+
+for (i in 1:nrow(filtered_ms_human_mice)) {
+  series <- filtered_ms_human_mice$Series[i]
+  term <- filtered_ms_human_mice$Term[i]
+  description<-filtered_ms_human_mice$Description[i]
+  # Obtain SampleDetail for the current series
+  detail <- SampleDetail(series)
+  
+  # Add the term as "Gene" to the detail list
+  detail$Gene <- term
+  detail$Background<-description
+  # Append the detail list to sample_detail
+  sample_detail[[length(sample_detail) + 1L]] <- detail
+  
+}
+
+# Initialize a counter to keep track of duplicate names
+counter <- 1
+
+# Loop through the indices of sample_detail
+for (i in seq_along(sample_detail)) {
+  # Get the series value at index i
+  series_value <- filtered_ms_human_mice$Series[i]
+  
+  # Check if the series_value is a duplicate
+  if (series_value %in% names(sample_detail )) {
+    # Append a counter to the series_value to make it unique
+    new_name <- paste0(series_value, "_", counter)
+    
+    # Increment the counter for future duplicates
+    counter <- counter + 1
+  } else {
+    # If series_value is not a duplicate, use it as is
+    new_name <- series_value
+  
+  }
+  
+  # Assign the new name to the corresponding element in sample_detail
+  names(sample_detail )[i] <- new_name
+}
+
+# Create an empty list to store responses
+responses_sample_characteristic<- list()
+
+# Loop through each gene description
+for (i in seq_along(sample_detail)) {
+
+  title <- sample_detail[[i]][["Characteristic"]]
+  gene <- gsub(" RNA-seq", "", filtered_ms_human_mice$Term[i])
+  # Create a list to store responses for the current gene
+  sample_responses <- list()
+  
+  # Loop to collect multiple responses
+  for (j in seq_along(title)) {  # Collecting responses for each title
+    answer <- grepl(gene, title[[j]], ignore.case = TRUE)
+    
+    # Store the response in the list
+    sample_responses[[j]] <- answer
+  }
+  
+  # Store the list of responses for the current gene in the main responses list
+  responses_sample_characteristic[[i]] <- sample_responses
+}
+
+# Rename the indices based on the charactristic values
+for (i in seq_along(responses_sample_characteristic)) {
+  series_value <- names(sample_detail)[i]
+  names(responses_sample_characteristic)[i] <- series_value
+}
+
+sample_detail_filtered <- sample_detail
+
+# Initialize valid_samples list
+valid_samples <- list()
+
+# Loop through sample characteristics
+for (i in seq_along(responses_sample_characteristic)) {
+  # Check if any element in the characteristic list is TRUE
+  is_valid_sample <- any(unlist(responses_sample_characteristic[[i]]))
+  
+  # Keep element if there's any TRUE value
+  if (is_valid_sample) {
+    # Get the name of the current sample
+    sample_name <- names(sample_detail)[i]
+    
+    # Add the sample to valid_samples
+    valid_samples[[length(valid_samples) + 1L]] <- sample_detail[[i]]
+    
+    # Optionally, you can assign the name to the new entry if you want,
+    # although it's not necessary since the name is retained from sample_detail
+    names(valid_samples)[length(valid_samples)] <- sample_name
+  }
+}
+
+# Assign valid_samples to sample_detail_filtered
+sample_detail_filtered <- valid_samples
+
+```
+
+Let's filter in using AI, all that came out as FALSE in responses_sample_characteristic. This hopefully reduces the amount of FALSE negatives. We will be using the 
+```{r}
+# Initialize valid_samples list
+valid_samples <- list()
+
+for (i in seq_along(responses_sample_characteristic)){
+  # Check if all element in the characteristic list is FALSE
+  is_valid_sample <- all(!unlist(responses_sample_characteristic[[i]]))
+   # Keep element if all values are FALSE
+  if (is_valid_sample){
+     # Get the name of the current sample
+    sample_name <- names(sample_detail)[i]
+    
+    # Add the sample to valid_samples
+    valid_samples[[length(valid_samples) + 1L]] <- sample_detail[[i]]
+    
+    # Optionally, you can assign the name to the new entry if you want,
+    # although it's not necessary since the name is retained from sample_detail
+    names(valid_samples)[length(valid_samples)] <- sample_name
+  }
+}
+
+# Assign valid_samples to sample_detail_FALSE
+sample_detail_FALSE<- valid_samples
+
+#Now we want to keep all that as a True response at 90% or over
+ 
+```
+
+
+
+```{r}
+
+# Create an empty list to store responses
+GPT3.5_Description_responses_FALSE <- list()
+
+# Loop through each gene description
+for (i in seq_along(sample_detail_FALSE)) {
+  gene <- gsub(" RNA-seq", "", sample_detail_FALSE[[i]]$Gene[1])
+  description <- sample_detail_FALSE[[i]]$Background[1]
+  
+  # Create a list to store responses for the current gene
+  gene_responses <- list()
+  
+  # Loop to collect multiple responses
+  for (j in 1:20) {  # Collecting 20 responses for each gene (adjust as needed)
+    answer <- chat(paste("You are analyzing an RNA-seq dataset description. Please evaluate whether the gene of interest:", gene, "has specifically been knocked down or knocked out based on the provided description.\n\nDescription:\n", description, "\n\nQuestion:\nBased on the provided description, has the gene of interest:", gene,"specifically been knocked down or knocked out? Please respond with TRUE if the gene has been mentioned being knocked down or knocked out, and FALSE otherwise. DO NOT provide an explanation"))
+    
+    # Store the response in the list
+    gene_responses[[j]] <- answer
+  }
+  
+  # Store the list of responses for the current gene in the main responses list
+  GPT3.5_Description_responses_FALSE [[i]] <- gene_responses
+}
+
+# Rename the indices based on the Series values
+for (i in seq_along(GPT3.5_Description_responses_FALSE )) {
+  series_value <- names(sample_detail_FALSE)[i]
+  names(GPT3.5_Description_responses_FALSE )[i] <- series_value
+}
+
+```
+
+Let's kepp all that has a TRUE response rate of 90% or higher
+```{r}
+#restart gene_counts
+gene_counts<-NULL
+
+# Loop through each gene (sublist) in the main list
+for (i in 1:length(GPT3.5_Description_responses_FALSE)) {
+  # Get the current list of responses for the gene
+  current_responses <- GPT3.5_Description_responses_FALSE[[i]]
+  
+  # Count the occurrences of TRUE and FALSE
+  true_counts<- gene_counts[i, "TRUE"] %>% sum(current_responses == TRUE)
+  false_counts<-gene_counts[i, "FALSE"] %>% sum(current_responses == FALSE)
+  series = names(GPT3.5_Description_responses_FALSE)[i]
+  response_percentage<- round((true_counts / (false_counts + true_counts)) * 100, 2)
+  
+  # Append the counts for the current gene to the gene_counts data frame
+  gene_counts <- rbind(gene_counts, data.frame(series, true_counts, false_counts,response_percentage))
+}
+
+Series_90per_or_higher <- list()
+
+for (i in gene_counts[gene_counts$response_percentage >= 90, "series"]) {
+  if (i %in% names(GPT3.5_Description_responses_FALSE)) {
+    Series_90per_or_higher[[i]] <- sample_detail_FALSE[[i]]
+  }
+}
+
+
+```
+
+Let's now combine our two dataframes Series_90per_or_higher and sample_detail_filtered
+```{r}
+Filtered_dataframe_combined <- c(Series_90per_or_higher, sample_detail_filtered)
+
+```
+
+
+Let's make xlsx files to go over the series from each filtering step
+```{r}
+GSE_GPT<-names(Series_90per_or_higher)
+
+df<- data.frame(GSE=GSE_GPT)
+
+# Define the file path where you want to save the Excel file
+file_path <- "GSE_GPT.xlsx"
+
+# Write the data frame to an Excel file
+write.xlsx(df, file_path, rowNames = FALSE)
+
+GSE_sample<-names(sample_detail_filtered)
+
+df<- data.frame(GSE=GSE_sample)
+
+# Define the file path where you want to save the Excel file
+file_path <- "GSE_sample.xlsx"
+
+# Write the data frame to an Excel file
+write.xlsx(df, file_path, rowNames = FALSE)
+
+```
+
+Now we prep our metadata using crawl_gsms from GEOfastaq package, this gives us all information on all samples within each series. More importantly it gives us the necessary information to construct necessary paths to later download in Elja. 
+```{r}
+#Now let's do this in bulk
+library("GEOfastq")
+srp_meta <- list()  # Initialize an empty list to store results
+
+# Loop through each list 
+for (i in seq_along(Filtered_dataframe_combined)) {
+  
+  # Get the name of the current series
+  sample_name <- names(Filtered_dataframe_combined)[i]
+  
+  # Get the gene in the current series
+  gene <- Filtered_dataframe_combined[[i]]$Gene[1]
+  
+  # Get the second index of the current list
+  index_value <- Filtered_dataframe_combined[[i]][[2]]
+  
+  # Apply crawl_gsms to the index value with error handling
+  result <- tryCatch({
+    crawl_gsms(index_value)
+  }, error = function(e) {
+    message(paste("Error occurred for sample:", sample_name, "Error message:", e$message))
+    return(NULL)  # Return NULL if error occurs
+  })
+  
+  if (!is.null(result) && nrow(result) > 0) {  # Proceed only if result is not NULL and not empty
+    result$gene <- gene  # Add 'gene' information to the result
+    
+    # Store the result in srp_meta with the name of the current list
+    srp_meta[[length(srp_meta) + 1L]] <- result
+    names(srp_meta)[length(srp_meta)] <- sample_name
+  } else {
+    message(paste("No data found for sample:", sample_name))
+  }
+}
+
+
+# Now we want to filter out all data frames that are do not contain RNA-seq under "library_strategy". We wish to keep data frames that contain at least 4 instances of RNA-seq under library_strategy. This is because some samples might have been chip-seq and some RNA-seq and we need at least 4 RNA-seq to be able to use a series, 2 WT and 2 KO/KD
+
+
+
+# Create a copy of srp_meta
+srp_meta_RNAseq <- srp_meta
+
+# Create an empty vector to store the indices that meet the condition
+indices <- c()
+
+# Iterate over each element in srp_meta_test
+for (i in seq_along(srp_meta_RNAseq)) {
+  # Count the occurrences of "RNA-Seq" in the library_strategy column
+  count_rnaseq <- sum(srp_meta_RNAseq[[i]]$library_strategy == "RNA-Seq")
+  
+  # If at least 4 "RNA-Seq" are present, store the index
+  if (count_rnaseq >= 4) {
+    indices <- c(indices, i)
+  }
+}
+
+# Remove elements from srp_meta_test that do not meet the condition
+srp_meta_RNAseq <- srp_meta_RNAseq[indices]
+
+# Print the indices that meet the condition
+print(indices)
+```
+
+
+```{r}
+#Let's prepare our metadata list
+metadata<-srp_meta_RNAseq
+
+#We want to keep these values and remove rest
+selected_names <- c("run", "gsm_name", "title", "organism_ch1", "library_layout", "series_id", "gene")
+
+# Loop through each sublist in metadata
+for (i in seq_along(metadata)) {
+  sublist <- metadata[[i]]  # Get the current sublist
+  
+  # Loop through each element in the sublist
+  for (name in names(sublist)) {
+    # Check if the current element's name is not in the selected names
+    if (!(name %in% selected_names)) {
+      # If it's not in the selected names, remove it from the sublist
+      sublist[[name]] <- NULL
+    }
+  }
+  
+  # Update the sublist back into metadata
+  metadata[[i]] <- sublist
+}
+
+
+# metadata contains our SRRs, now lets get our necessary information to construct our file path. The get_dldir fetches our path and lets make a new column called path that stores this information.
+
+# Loop through each list in metadata
+for (i in seq_along(metadata)) {
+  # Initialize a new_column as an empty character vector
+  metadata[[i]]$path <- character(length = length(metadata[[i]][[1]]))
+  
+  # Loop through each element in the sublist
+  for (j in seq_along(metadata[[i]][[1]])) {
+    result <- get_dldir(metadata[[i]][[1]][[j]], type = c("ebi", "ncbi"))
+    metadata[[i]]$path[j] <- result
+  }
+}
+
+
+#now we need to double the last /SRR to the original strings, this is how the file path is formatted for some reason.
+
+for (i in seq_along(metadata)) {
+  original_strings <- metadata[[i]]$path
+  new_strings <- vector("character", length(original_strings))
+  
+  for (j in seq_along(original_strings)) {
+    new_strings[j] <- paste0(original_strings[j], "/", sub("^.+/", "", original_strings[j]))
+  }
+  
+  metadata[[i]]$path <- new_strings
+}
+
+
+#now we want to complete the file path
+
+# Loop through each list in metadata
+for (i in seq_along(metadata)) {
+  # Initialize a new_column as an empty character vector
+  original_string <- metadata[[i]]$path
+  new_strings <- character(length(original_string))
+  
+  # Loop through each element in the sublist
+  for (j in seq_along(original_string)) {
+    new_strings[j] <- paste("ftp://ftp.sra.ebi.ac.uk/vol1/fastq/", original_string[j], ".fastq.gz", sep = "")
+  }
+  metadata[[i]]$path <- new_strings
+}
+
+
+```
+
+Now we create an excel file to manually go over all of the samples within each series
+```{r}
+GSE_metadata<-names(metadata)
+
+df<- data.frame(GSE=GSE_metadata)
+
+# Define the file path where you want to save the Excel file
+file_path <- "GSE_metadata.xlsx"
+
+# Write the data frame to an Excel file
+write.xlsx(df, file_path, rowNames = FALSE) 
+
+```
+
+output from our excel
+```{r}
+library(readxl)
+
+# Read the file path
+file_path <- "meta_data_output.xlsx"
+
+# Get sheet names
+sheet_names <- excel_sheets(file_path)
+
+# Create an empty list to store named data frames
+meta_data_output <- list()
+
+# Read each sheet, assign the name to the data frame, and rename indices
+for (i in 1:length(sheet_names)) {
+  sheet_name <- sheet_names[i]  # Access current sheet name
+  data_frame <- read_excel(file_path, sheet = sheet_name)
+
+  meta_data_output[[i]] <- data_frame 
+  names(meta_data_output)[[i]]<-sheet_name #Assign data frame with name in the list
+}
+
+```
+
+
+We need to add _1 and _2 to the file paths for those that are paired.
+```{r}
+modify_urls <- function(data_list) {
+  for (i in seq_along(data_list)) {
+    layout <- data_list[[i]]$library_layout
+    paths <- data_list[[i]]$path
+    modified_paths <- character()
+    
+    for (j in seq_along(paths)) {
+      if (layout[j] == "PAIRED") {
+        # Modify the URL for paired layout
+        file_name <- basename(paths[j])
+        file_parts <- strsplit(file_name, "\\.")[[1]]
+        modified_file_name_1 <- paste0(file_parts[1], "_1.", file_parts[2], ".gz")
+        modified_file_name_2 <- paste0(file_parts[1], "_2.", file_parts[2], ".gz")
+        
+        # Construct the modified URLs for _1 and _2 files
+        original_prefix <- dirname(paths[j])
+        modified_path_1 <- paste(original_prefix, modified_file_name_1, sep = "/")
+        modified_path_2 <- paste(original_prefix, modified_file_name_2, sep = "/")
+        
+        # Combine both modified paths in one string
+        combined_modified_paths <- paste(modified_path_1, modified_path_2, sep = "\n")
+        
+        # Append the combined modified paths to the list
+        modified_paths <- c(modified_paths, combined_modified_paths)
+      } else {
+        # For single layout, keep the original URL
+        modified_paths <- c(modified_paths, paths[j])
+      }
+    }
+    
+    data_list[[i]]$path <- modified_paths
+  }
+  
+  return(data_list)
+}
+
+modified_data_list <- modify_urls(meta_data_output)
+```
+
+
+Let's write our txt file: based on mouse single, mouse paired, human single and human paired
+
+```{r}
+write_links <- function(links_list, file_path) {
+  mouse_single <- character()
+  mouse_paired <- character()
+  human_single <- character()
+  human_paired <- character()
+
+  for (i in seq_along(links_list)) {
+    item <- links_list[[i]]
+   
+    for (j in seq_along(item[["organism_ch1"]])) { # Loop through the elements of 'organism_ch1'
+      organism <- item[["organism_ch1"]][[j]]
+      layout <- item[["library_layout"]][[j]]
+      path <- item[["path"]][[j]]
+        
+      if (!is.null(organism) && !is.null(layout)) { # Check inside the loop
+        if (organism == "Mus musculus") {
+          if (layout == "SINGLE") {
+            mouse_single <- c(mouse_single, path)
+          } else {
+            mouse_paired <- c(mouse_paired, path)
+          }
+        } else {
+          if (layout == "SINGLE") {
+            human_single <- c(human_single, path)
+          } else {
+            human_paired <- c(human_paired, path)
+          }
+        }
+      }
+    }
+  }
+
+  file_conn <- file(file_path, open = "w")
+
+  writeLines("Mouse Single Transcripts", file_conn)
+  writeLines(mouse_single, file_conn)
+
+  writeLines("Mouse Paired Transcripts", file_conn)
+  writeLines(mouse_paired, file_conn)
+
+  writeLines("Human Single Transcripts", file_conn)
+  writeLines(human_single, file_conn)
+
+  writeLines("Human Paired Transcripts", file_conn)
+  writeLines(human_paired, file_conn)
+
+  close(file_conn)
+}
+
+
+
+write_links(modified_data_list, "FASTAQ_paths_again.txt")
+
+```
