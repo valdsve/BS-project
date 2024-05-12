@@ -1,0 +1,1185 @@
+---
+title: "Deseq2"
+author: "Valdimar"
+date: "2024-03-06"
+output: html_document
+---
+```{r}
+library("tximport")
+library(DESeq2)
+library(TxDb.Mmusculus.UCSC.mm10.ensGene)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(EnsDb.Mmusculus.v79)
+library(kableExtra)
+library(dplyr)
+library(Homo.sapiens)
+```
+
+
+Deseq2 analysis pipeline
+```{r}
+Deseq2_analysis <- function(metadata) {
+  
+  # Create an empty list to store results
+  result_Deseq2 <- list()
+  
+  for (i in seq_along(metadata)) {
+    
+    target_gene <- metadata[[i]]$gene[1]
+    clean_gene_name <- sub(" RNA-seq", "", target_gene)
+    
+    GSE <- metadata[[i]]  # Extract each experiment from the list
+    
+    # Create the necessary metadata for DESeq2
+    samples <- data.frame(sample = GSE$run, condition = GSE$condition, row.names = NULL)
+    
+    # Create the path to the abundance.h5 file
+    path <- file.path("C:", "Users", "valds", "OneDrive - Menntaský", "BS_project", "kallisto_output", GSE$run, "abundance.h5")
+    
+    #check if files exist
+  if (all(file.exists(path))) {
+    print("Files exist.")
+    if (metadata[[i]][["organism_ch1"]][1]=="Mus musculus"){
+      txdb <- TxDb.Mmusculus.UCSC.mm10.ensGene
+      k <- keys(txdb, keytype = "TXNAME")
+      tx2gene <- AnnotationDbi::select(txdb, k, "GENEID", "TXNAME")
+      txi <- tximport(path, type = "kallisto", tx2gene = tx2gene, ignoreTxVersion = TRUE)
+    
+    ddsTxi <- DESeqDataSetFromTximport(txi,
+                                       colData = samples,
+                                       design = ~condition)
+    
+    #recommended step to reduce computational time
+    keep <- rowSums(counts(ddsTxi)) >= 10
+    dds <- ddsTxi[keep,]
+    
+    #Sets the reference level to WT
+    dds$condition <- relevel(dds$condition, ref = "WT")
+    
+    #Does the analysis
+    dds <- DESeq(dds)
+    
+    #Saves the results
+    res <- results(dds)
+    res <- as.data.frame(res)
+    
+    
+    hist_obj <- hist(res$pvalue, breaks = 100, main = "Histogram of p values", xlab = "p value", lwd = 0.3, freq = FALSE, col = "blue")
+    
+    
+    ddscount <- counts(dds, normalized = TRUE)
+    colnames(ddscount) <- dds$condition
+    
+    #Getting gene symbols
+    geneIDs1 <- ensembldb::select(EnsDb.Mmusculus.v79, keys = rownames(res), keytype = "GENEID", columns = c("SYMBOL", "GENEID"))
+    res$gene <- geneIDs1$SYMBOL[base::match(rownames(res), geneIDs1$GENEID)]
+    
+    resOrdered <- res[base::order(res$pvalue),]
+    resOrdered_with_norm_counts <- merge(as.data.frame(resOrdered), ddscount, by = 'row.names', all = TRUE)
+    resOrdered_with_norm_counts <- resOrdered_with_norm_counts[order(resOrdered_with_norm_counts$pvalue),]
+    resOrdered_with_norm_counts <- resOrdered_with_norm_counts[resOrdered_with_norm_counts$padj < 0.1,]
+    resOrdered_with_norm_counts <- na.omit(resOrdered_with_norm_counts)
+    
+    all_detected_genes <- na.omit(merge(as.data.frame(resOrdered), ddscount, by = 'row.names', all = TRUE))
+    all_detected_genes <- all_detected_genes[order(all_detected_genes$padj),]
+    all_detected_genes$Row.names<- all_detected_genes$gene
+all_detected_genes$gene <- NULL
+names(all_detected_genes)[names(all_detected_genes) == "Row.names"] <- "gene"
+all_detected_genes$gene <- toupper(all_detected_genes$gene)
+  
+    
+    #filter out SP1, Cirbp, Rbm3, Rtn3 and Smyd5
+    Sp1_Cirbp_Rbm3_Rtn3_Smyd5 <- all_detected_genes[all_detected_genes$gene %in% c("SP1", "CIRBP", "RBM3", "RTN3", "SMYD5", clean_gene_name),]
+    
+
+
+result_Deseq2[[GSE$series_id[1]]] <- list()
+
+# Assign values to the elements of the new list
+result_Deseq2[[GSE$series_id[1]]]$MHR <- Sp1_Cirbp_Rbm3_Rtn3_Smyd5
+result_Deseq2[[GSE$series_id[1]]]$p_histogram <- hist_obj
+result_Deseq2[[GSE$series_id[1]]]$res_summary <- summary(res)
+   }
+  
+   else {TxDb(Homo.sapiens) <- TxDb.Hsapiens.UCSC.hg38.knownGene
+        k <- keys(TxDb(Homo.sapiens), keytype = "TXNAME")
+        tx2gene <- AnnotationDbi::select(Homo.sapiens, k, "SYMBOL", "TXNAME")
+        colnames(tx2gene) <- c("TXNAME", "GENEID")
+        tx2gene <- na.omit(tx2gene)
+        txi <- tximport(path, type = "kallisto", tx2gene = tx2gene)    
+   
+        ddsTxi <- DESeqDataSetFromTximport(txi,
+                                       colData = samples,
+                                       design = ~condition)
+      #recommended step to reduce computational time
+       keep <- rowSums(counts(ddsTxi)) >= 10
+        dds <- ddsTxi[keep,]
+    
+      #Sets the reference level to WT
+        dds$condition <- relevel(dds$condition, ref = "WT")
+    
+      #Does the analysis
+        dds <- DESeq(dds)
+    
+      #Saves the results
+      res <- results(dds)
+      res <- as.data.frame(res)
+    
+      #makes p_value-histogram
+      hist_obj <- hist(res$pvalue, breaks = 100, main = "Histogram of p values", xlab = "p value", lwd = 0.3, freq = FALSE, col = "blue")
+    
+    ddscount <- counts(dds, normalized = TRUE)
+    colnames(ddscount) <- dds$condition
+    
+    #Getting gene symbols
+    resOrdered <- res[base::order(res$pvalue),]
+    resOrdered_with_norm_counts <- merge(as.data.frame(resOrdered), ddscount, by = 'row.names', all = TRUE)
+    resOrdered_with_norm_counts <- resOrdered_with_norm_counts[order(resOrdered_with_norm_counts$pvalue),]
+    resOrdered_with_norm_counts <- resOrdered_with_norm_counts[resOrdered_with_norm_counts$padj < 0.1,]
+    resOrdered_with_norm_counts <- na.omit(resOrdered_with_norm_counts)
+    
+    all_detected_genes <- na.omit(merge(as.data.frame(resOrdered), ddscount, by = 'row.names', all = TRUE))
+    all_detected_genes <- all_detected_genes[order(all_detected_genes$padj),]
+    names(all_detected_genes)[names(all_detected_genes) == "Row.names"] <- "gene"
+    all_detected_genes$gene <- toupper(all_detected_genes$gene)
+    
+    
+    #filter out SP1, Cirbp, Rbm3, Rtn3 and Smyd5
+    Sp1_Cirbp_Rbm3_Rtn3_Smyd5 <- all_detected_genes[all_detected_genes$gene %in% c("SP1", "CIRBP", "RBM3", "RTN3", "SMYD5", clean_gene_name),]
+    
+  
+
+result_Deseq2[[GSE$series_id[1]]] <- list()
+
+# Assign values to the elements of the new list
+result_Deseq2[[GSE$series_id[1]]]$MHR <- Sp1_Cirbp_Rbm3_Rtn3_Smyd5
+result_Deseq2[[GSE$series_id[1]]]$p_histogram <- hist_obj
+result_Deseq2[[GSE$series_id[1]]]$res_summary <- summary(res)
+     
+    }  
+    
+  }
+    else {print("files not found")}
+  }
+
+  
+  return(result_Deseq2)
+}
+
+
+deseq_result<- Deseq2_analysis(modified_data_list_series_id_fixed)
+
+
+
+
+```
+
+
+
+
+
+Filter out series whose histogram is obviously not "anti-conservative"
+
+```{r}
+# These the following indeces
+
+bad_histogram_indices<- c(4, 10, 13, 18, 20, 21, 22, 31, 33, 36, 38, 40, 54, 57, 58, 59, 63, 66, 67, 85, 94)
+
+#lets keep all "anti-conservative" histograms
+deseq_result_good_histo<-deseq_result[-bad_histogram_indices]
+
+```
+
+```{r}
+FINAL_RESULT <- list()
+
+for (name in names(deseq_result_good_histo)) {
+  FINAL_RESULT[[name]] <- list()  # Initialize the list to store results under the current name
+  
+  for (i in seq_along(deseq_result[[name]])) {  # Iterate over the indices of the current list
+    FINAL_RESULT[[name]]$padj<-deseq_result[[name]]$MHR$padj
+    FINAL_RESULT[[name]]$gene <- deseq_result[[name]]$MHR$gene
+    FINAL_RESULT[[name]]$log2FoldChange <- deseq_result[[name]]$MHR$log2FoldChange
+    target_gene <- modified_data_list[[name]]$gene[1]
+    clean_gene_name <- sub(" RNA-seq", "", target_gene)
+    #find out how many rows are present
+    length <- length(FINAL_RESULT[[name]]$gene)
+    # Repeat clean_gene_name 'length' times
+    target_gene_vector <- rep(clean_gene_name, length)
+    FINAL_RESULT[[name]]$targetgene <- target_gene_vector
+  }
+}
+```
+
+We want to remove every series where the target genes have padj greater than 0.1. This is because we only want instances where there was a significant KD.
+```{r}
+
+FINAL_RESULT_KD <- list()
+
+for (i in seq_along(FINAL_RESULT)) {
+  indices <- which(FINAL_RESULT[[i]]$targetgene == FINAL_RESULT[[i]]$gene)
+  selected_padj <- FINAL_RESULT[[i]]$padj[indices]
+  selected_logfold<- FINAL_RESULT[[i]]$log2FoldChange[indices]
+  print(selected_padj)
+  if (any(selected_padj < 0.1 & selected_logfold < 0 )) {
+    FINAL_RESULT_KD[[names(FINAL_RESULT)[i]]] <- FINAL_RESULT[[i]]
+  } else {
+    print("Not a significant KD/KO")
+  }
+}
+
+```
+
+Load in Gecko list
+```{r}
+# Load the readxl package
+library(readxl)
+
+# Define the path to your Excel file
+excel_file <- "Gecko_list.xlsx"
+
+# Specify the names of the sheets you want to read
+sheets_to_read <- c("SP1_repr", "RBM3_repr", "SP1_actv")
+
+# Create an empty list to store the data frames
+gecko_list <- list()
+
+# Loop through each sheet and read the data into a data frame
+for (sheet_name in sheets_to_read) {
+  gecko_list[[sheet_name]] <- read_excel(excel_file, sheet = sheet_name)
+}
+```
+
+
+Create the final graphs
+```{r}
+# Load ggplot2 library
+library(ggplot2)
+
+# List of genes of interest
+genes_of_interest <- c("RBM3", "SMYD5", "RTN3", "CIRBP", "SP1")
+
+
+create_gene_plot <- function(exp_name, gene, gene_plots, gecko_list, FINAL_RESULT_KD) {
+ 
+  
+  exp_data <- FINAL_RESULT_KD[[exp_name]]
+
+  # Check if the gene is in the experiment data
+  if (gene %in% exp_data$gene) {
+    index <- which(exp_data$gene == gene)
+    log2FoldChange <- exp_data$log2FoldChange[index]
+    targetgene <- exp_data$targetgene[index]
+    p_value <- exp_data$padj[index]
+
+    # Check if the plot for this gene already exists
+    if (gene %in% names(gene_plots)) {
+      # Extract the existing plot and add new data to it
+      existing_plot <- gene_plots[[gene]]$plot
+      new_data <- data.frame(TargetGene = targetgene, Log2FoldChange = log2FoldChange, P_value = p_value)
+
+      # Define the color based on your conditions
+      if (gene == "RBM3" && targetgene %in% gecko_list$RBM3_repr$RBM3_repr) {
+        label_color <- "red"
+      } else if (gene == "SP1" && targetgene %in% gecko_list$SP1_repr$SP1_repr) {
+        label_color <- "red"
+      } else if (gene == "SP1" && targetgene %in% gecko_list$SP1_actv$SP1_actv) {
+        label_color <- "blue"
+      } else {
+        label_color <- "black" # Default color if conditions not met
+      }
+
+      
+      # Add new data to the plot
+      existing_plot <- existing_plot +
+        geom_point(data = new_data, aes(x = TargetGene, y = Log2FoldChange), color = label_color, size = ifelse(p_value < 0.1, 3, 2), shape = ifelse(p_value < 0.1, 18, 16)) 
+
+      # Update the plot in the gene_plots list
+      gene_plots[[gene]]$plot <- existing_plot
+      # Store the exp_data under exp_name
+      gene_plots[[gene]]$exp_data[[exp_name]] <- exp_data
+    } else {
+      # Create a new plot for the gene
+      plot_data <- data.frame( TargetGene = targetgene, Log2FoldChange = log2FoldChange, P_value = p_value )
+
+      # Define the color based on your conditions
+      if (gene == "RBM3" && targetgene %in% gecko_list$RBM3_repr$RBM3_repr) {
+        label_color <- "red"
+      } else if (gene == "SP1" && targetgene %in% gecko_list$SP1_repr$SP1_repr) {
+        label_color <- "red"
+      } else if (gene == "SP1" && targetgene %in% gecko_list$SP1_actv$SP1_actv) {
+        label_color <- "blue"
+      } else {
+        label_color <- "black" # Default color if conditions not met
+      }
+
+      # Create the plot
+      p <- ggplot(plot_data, aes(x = TargetGene, y = Log2FoldChange)) +
+        theme_light()+
+        geom_point(color = label_color, size = ifelse(p_value < 0.1, 3, 2), shape = ifelse(p_value < 0.1, 18, 16)) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "gray") + 
+        geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = 0, ymax = Inf), fill = "red", alpha = 0.2) +
+        geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = 0), fill = "blue", alpha = 0.2) +
+        labs(y = "Log2Fold Change", title = paste("Log2Fold Change for", gene)) +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1),panel.grid.major.y = element_blank(),
+  panel.grid.minor.y = element_blank()) + 
+        guides(color = FALSE)
+
+      # Store the plot and exp_data under exp_name
+gene_plots[[gene]] <- list(plot = p, exp_data = setNames(list(exp_data), exp_name))
+
+    }
+  } 
+
+  return(gene_plots) # Ensure to return the updated gene_plots
+}
+
+# Create an empty list to store plots for each gene of interest
+gene_plots <- list()
+
+
+# List of genes of interest
+genes_of_interest <- c("RBM3", "SMYD5", "RTN3", "CIRBP", "SP1")
+
+
+# Loop over each experiment in FINAL_RESULT_KD
+for (exp_name in names(FINAL_RESULT_KD)) {
+  # Add a new target gene to our genes of interest
+  new_targetgene <- FINAL_RESULT_KD[[exp_name]]$targetgene[1]
+  genes_of_interest <- c(genes_of_interest, new_targetgene)
+  
+  # Loop over each gene of interest
+  for (gene in genes_of_interest) {
+    gene_plots <- create_gene_plot(exp_name, gene, gene_plots, gecko_list, FINAL_RESULT_KD)
+  }
+}
+
+
+```
+
+Now we want to only keep genes that have at least one significant result (p < 0.1)
+
+```{r}
+#first we need to append our first data point into layers in the data frame
+gene_plots_tofilter<- gene_plots
+
+for (name in names(gene_plots_tofilter)){
+  gene_plots_tofilter[[name]]$plot$layers[[1]]$data <- gene_plots_tofilter[[name]]$plot$data
+} 
+```
+
+
+```{r} 
+gene_pvalues <- list()
+
+# Get the total number of layers
+for (i in seq_along(gene_plots_tofilter)){
+  name_geneOFinterest<- names(gene_plots_tofilter[i])
+
+for (j in seq_along(gene_plots_tofilter[[i]]$plot$layers)) { 
+  layer <- gene_plots_tofilter[[i]]$plot$layers[[j]]
+  gene <- layer$data$TargetGene
+  pvalue <- layer$data$P_value
+  
+  # Append the gene and its corresponding p-value to the list
+  gene_pvalues[[name_geneOFinterest]][[j]] <- list(gene = gene, pvalue = pvalue)
+}
+}
+# We do not wish to filter out indexes with NULL values. We would like to keep all indexes to use to filter out data points later.
+```
+
+```{r}
+gene_pvalues_noNULL<- gene_pvalues
+# Filter out NULL values from gene_pvalues and store the result back in gene_pvalues
+gene_pvalues_noNULL <- lapply(gene_pvalues_noNULL, function(x) Filter(function(y) !is.null(y$gene) && !is.null(y$pvalue), x))
+
+
+# Create a new list to store grouped genes and p-values
+grouped_gene_pvalues <- list()
+
+for (i in seq_along(gene_pvalues_noNULL)) {
+  name_geneOFinterest <- names(gene_pvalues_noNULL)[i]
+  
+  # Initialize entry for the current gene
+  grouped_gene_pvalues[[name_geneOFinterest]] <- list()
+  
+  # Loop through gene_pvalues_noNULL list
+  for (entry in gene_pvalues_noNULL[[i]]) {
+    gene <- entry$gene
+    pvalue <- entry$pvalue
+    
+    # Check if gene already exists in grouped_gene_pvalues
+    if (gene %in% names(grouped_gene_pvalues[[name_geneOFinterest]])) {
+      # Append pvalue to existing gene entry
+      grouped_gene_pvalues[[name_geneOFinterest]][[gene]] <- c(grouped_gene_pvalues[[name_geneOFinterest]][[gene]], pvalue)
+    } else {
+      # Create new entry for gene
+      grouped_gene_pvalues[[name_geneOFinterest]][[gene]] <- c(pvalue)
+    }
+  }
+}
+
+
+# Initialize an empty list to store genes with at least one p-value less than 0.1
+filtered_gene_pvalues <- list()
+
+# Loop through each gene in grouped_gene_pvalues
+for (gene in names(grouped_gene_pvalues)) {
+ 
+    
+    # Initialize an empty list to store p-values less than 0.1 for the current gene
+    filtered_gene_pvalues[[gene]] <- list()
+    
+    # Loop through each sublist of p-values for the current gene
+    for (sub_gene in names(grouped_gene_pvalues[[gene]])) {
+        any_p_value_below_threshold <- any(grouped_gene_pvalues[[gene]][[sub_gene]] < 0.1)
+        
+        if (any_p_value_below_threshold) {
+            
+            filtered_gene_pvalues[[gene]][[sub_gene]] <- grouped_gene_pvalues[[gene]][[sub_gene]]
+        } 
+    }
+}
+
+
+
+indices <- list()
+
+# Loop through each column (assuming columns represent genes)
+for (name in names(gene_pvalues)) {
+  # Initialize an empty vector to store indices for each gene
+  indices[[name]]<-c()
+  
+  # Loop through each gene in the column
+  for (i in seq_along(gene_pvalues[[name]])){
+    # Check if the gene is present in filtered_gene_pvalues
+    if (!is.null(gene_pvalues[[name]][[i]]$gene)){
+    if (gene_pvalues[[name]][[i]]$gene %in% names(filtered_gene_pvalues[[name]])) {
+      # If yes, store the index
+      indices[[name]] <- c(indices[[name]], i)
+      }
+    }
+  }
+}
+
+
+#need to add 2,3,4 since it is important for the graph design
+for (name in names(indices)) {
+  additional_indices <- c(2, 3, 4)
+  indices[[name]] <- union(indices[[name]], additional_indices)
+}
+
+```
+
+```{r}
+filtered_layers <- list()
+
+for (name in names(indices)) {
+  filtered_layers[[name]] <- list()  # Initialize list for each gene
+  
+  for (i in indices[[name]]) {
+    # Check if the index is within the bounds of the layers list
+    if (i <= length(gene_plots_tofilter[[name]]$plot$layers)) {
+      # Add the layer to the filtered list
+      filtered_layers[[name]] <- c(filtered_layers[[name]], gene_plots_tofilter[[name]]$plot$layers[[i]])
+    }
+  }
+}
+   
+
+gene_plots_tofilter2<- gene_plots_tofilter
+
+
+
+for (name in names(filtered_layers)){
+# Filter and assign the layers
+gene_plots_tofilter2[[name]]$plot$layers <- filtered_layers[[name]]
+}
+
+#we should remove "data" under "plot" because it should be present in layers if its significant, if not then it adds unnecessary x value
+
+GoI<- c("RBM3", "CIRBP", "RTN3", "SMYD5", "SP1")
+
+
+FINAL_gene_plots<- gene_plots_tofilter2
+
+
+
+for (gene_of_interest in GoI) {
+  FINAL_gene_plots[[gene_of_interest]]$plot$data <-  FINAL_gene_plots[[gene_of_interest]]$plot$layers[[1]]$data
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+NOW do the same but lets not worry about significant knock downs
+
+Create the final graphs
+
+```{r}
+# Load ggplot2 library
+library(ggplot2)
+
+# List of genes of interest
+genes_of_interest <- c("RBM3", "SMYD5", "RTN3", "CIRBP", "SP1")
+
+
+create_gene_plot <- function(exp_name, gene, gene_plots, gecko_list, FINAL_RESULT) {
+ 
+  
+  exp_data <- FINAL_RESULT[[exp_name]]
+
+  # Check if the gene is in the experiment data
+  if (gene %in% exp_data$gene) {
+    index <- which(exp_data$gene == gene)
+    log2FoldChange <- exp_data$log2FoldChange[index]
+    targetgene <- exp_data$targetgene[index]
+    p_value <- exp_data$padj[index]
+
+    # Check if the plot for this gene already exists
+    if (gene %in% names(gene_plots)) {
+      # Extract the existing plot and add new data to it
+      existing_plot <- gene_plots[[gene]]$plot
+      new_data <- data.frame(TargetGene = targetgene, Log2FoldChange = log2FoldChange, P_value = p_value)
+
+      # Define the color based on your conditions
+      if (gene == "RBM3" && targetgene %in% gecko_list$RBM3_repr$RBM3_repr) {
+        label_color <- "red"
+      } else if (gene == "SP1" && targetgene %in% gecko_list$SP1_repr$SP1_repr) {
+        label_color <- "red"
+      } else if (gene == "SP1" && targetgene %in% gecko_list$SP1_actv$SP1_actv) {
+        label_color <- "blue"
+      } else {
+        label_color <- "black" # Default color if conditions not met
+      }
+
+      
+
+      
+      # Add new data to the plot
+      existing_plot <- existing_plot +
+        geom_point(data = new_data, aes(x = TargetGene, y = Log2FoldChange), color = label_color, size = ifelse(p_value < 0.1, 3, 2), shape = ifelse(p_value < 0.1, 18, 1)) 
+
+      # Update the plot in the gene_plots list
+      gene_plots[[gene]]$plot <- existing_plot
+      # Store the exp_data under exp_name
+      gene_plots[[gene]]$exp_data[[exp_name]] <- exp_data
+    } else {
+      # Create a new plot for the gene
+      plot_data <- data.frame( TargetGene = targetgene, Log2FoldChange = log2FoldChange, P_value = p_value )
+
+      # Define the color based on your conditions
+      if (gene == "RBM3" && targetgene %in% gecko_list$RBM3_repr$RBM3_repr) {
+        label_color <- "red"
+      } else if (gene == "SP1" && targetgene %in% gecko_list$SP1_repr$SP1_repr) {
+        label_color <- "red"
+      } else if (gene == "SP1" && targetgene %in% gecko_list$SP1_actv$SP1_actv) {
+        label_color <- "blue"
+      } else {
+        label_color <- "black" # Default color if conditions not met
+      }
+
+      
+      # Create the plot
+     p <- ggplot(plot_data, aes(x = TargetGene, y = Log2FoldChange))+
+        theme_light() +
+        geom_point(color = label_color, size = ifelse(p_value < 0.1, 3, 2), shape = ifelse(p_value < 0.1, 18, 1)) +
+        geom_hline(yintercept = 0, linetype = "solid", color = "gray") + 
+        geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = 0, ymax = Inf), fill = "red", alpha = 0.2) +
+        geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = 0), fill = "blue", alpha = 0.2) +
+        labs(y = "Log2Fold Change", title = paste("Log2Fold Change for", gene)) +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1),panel.grid.major.y = element_blank(),
+  panel.grid.minor.y = element_blank()) + 
+        guides(color = FALSE)
+      
+
+      # Store the plot and exp_data under exp_name
+gene_plots[[gene]] <- list(plot = p, exp_data = setNames(list(exp_data), exp_name))
+
+    }
+  } 
+
+  return(gene_plots) # Ensure to return the updated gene_plots
+}
+
+# Create an empty list to store plots for each gene of interest
+gene_plots <- list()
+
+
+# List of genes of interest
+genes_of_interest <- c("RBM3", "SMYD5", "RTN3", "CIRBP", "SP1")
+
+
+# Loop over each experiment in FINAL_RESULT
+for (exp_name in names(FINAL_RESULT)) {
+  # Add a new target gene to our genes of interest
+  new_targetgene <- FINAL_RESULT[[exp_name]]$targetgene[1]
+  genes_of_interest <- c(genes_of_interest, new_targetgene)
+  
+  # Loop over each gene of interest
+  for (gene in genes_of_interest) {
+    gene_plots <- create_gene_plot(exp_name, gene, gene_plots, gecko_list, FINAL_RESULT)
+  }
+}
+
+
+```
+
+Now we want to only keep genes that have at least one significant result (p < 0.1)
+
+```{r}
+#first we need to append our first data point into layers in the data frame
+gene_plots_tofilter<- gene_plots
+
+for (name in names(gene_plots_tofilter)){
+  gene_plots_tofilter[[name]]$plot$layers[[1]]$data <- gene_plots_tofilter[[name]]$plot$data
+} 
+```
+
+
+```{r} 
+gene_pvalues <- list()
+
+# Get the total number of layers
+for (i in seq_along(gene_plots_tofilter)){
+  name_geneOFinterest<- names(gene_plots_tofilter[i])
+
+for (j in seq_along(gene_plots_tofilter[[i]]$plot$layers)) { 
+  layer <- gene_plots_tofilter[[i]]$plot$layers[[j]]
+  gene <- layer$data$TargetGene
+  pvalue <- layer$data$P_value
+  
+  # Append the gene and its corresponding p-value to the list
+  gene_pvalues[[name_geneOFinterest]][[j]] <- list(gene = gene, pvalue = pvalue)
+}
+}
+# We do not wish to filter out indexes with NULL values. We would like to keep all indexes to use to filter out data points later.
+```
+
+```{r}
+gene_pvalues_noNULL<- gene_pvalues
+# Filter out NULL values from gene_pvalues and store the result back in gene_pvalues
+gene_pvalues_noNULL <- lapply(gene_pvalues_noNULL, function(x) Filter(function(y) !is.null(y$gene) && !is.null(y$pvalue), x))
+
+
+# Create a new list to store grouped genes and p-values
+grouped_gene_pvalues <- list()
+
+for (i in seq_along(gene_pvalues_noNULL)) {
+  name_geneOFinterest <- names(gene_pvalues_noNULL)[i]
+  
+  # Initialize entry for the current gene
+  grouped_gene_pvalues[[name_geneOFinterest]] <- list()
+  
+  # Loop through gene_pvalues_noNULL list
+  for (entry in gene_pvalues_noNULL[[i]]) {
+    gene <- entry$gene
+    pvalue <- entry$pvalue
+    
+    # Check if gene already exists in grouped_gene_pvalues
+    if (gene %in% names(grouped_gene_pvalues[[name_geneOFinterest]])) {
+      # Append pvalue to existing gene entry
+      grouped_gene_pvalues[[name_geneOFinterest]][[gene]] <- c(grouped_gene_pvalues[[name_geneOFinterest]][[gene]], pvalue)
+    } else {
+      # Create new entry for gene
+      grouped_gene_pvalues[[name_geneOFinterest]][[gene]] <- c(pvalue)
+    }
+  }
+}
+
+
+# Initialize an empty list to store genes with at least one p-value less than 0.1
+filtered_gene_pvalues <- list()
+
+# Loop through each gene in grouped_gene_pvalues
+for (gene in names(grouped_gene_pvalues)) {
+ 
+    
+    # Initialize an empty list to store p-values less than 0.1 for the current gene
+    filtered_gene_pvalues[[gene]] <- list()
+    
+    # Loop through each sublist of p-values for the current gene
+    for (sub_gene in names(grouped_gene_pvalues[[gene]])) {
+        any_p_value_below_threshold <- any(grouped_gene_pvalues[[gene]][[sub_gene]] < 0.1)
+        
+        if (any_p_value_below_threshold) {
+            
+            filtered_gene_pvalues[[gene]][[sub_gene]] <- grouped_gene_pvalues[[gene]][[sub_gene]]
+        } 
+    }
+}
+
+
+
+indices <- list()
+
+# Loop through each column (assuming columns represent genes)
+for (name in names(gene_pvalues)) {
+  # Initialize an empty vector to store indices for each gene
+  indices[[name]]<-c()
+  
+  # Loop through each gene in the column
+  for (i in seq_along(gene_pvalues[[name]])){
+    # Check if the gene is present in filtered_gene_pvalues
+    if (!is.null(gene_pvalues[[name]][[i]]$gene)){
+    if (gene_pvalues[[name]][[i]]$gene %in% names(filtered_gene_pvalues[[name]])) {
+      # If yes, store the index
+      indices[[name]] <- c(indices[[name]], i)
+      }
+    }
+  }
+}
+
+
+#need to add 2,3,4 since it is important for the graph design
+for (name in names(indices)) {
+  additional_indices <- c(2, 3, 4)
+  indices[[name]] <- union(indices[[name]], additional_indices)
+}
+
+```
+
+```{r}
+filtered_layers <- list()
+
+for (name in names(indices)) {
+  filtered_layers[[name]] <- list()  # Initialize list for each gene
+  
+  for (i in indices[[name]]) {
+    # Check if the index is within the bounds of the layers list
+    if (i <= length(gene_plots_tofilter[[name]]$plot$layers)) {
+      # Add the layer to the filtered list
+      filtered_layers[[name]] <- c(filtered_layers[[name]], gene_plots_tofilter[[name]]$plot$layers[[i]])
+    }
+  }
+}
+   
+
+gene_plots_tofilter2<- gene_plots_tofilter
+
+
+
+for (name in names(filtered_layers)){
+# Filter and assign the layers
+gene_plots_tofilter2[[name]]$plot$layers <- filtered_layers[[name]]
+}
+
+#we should remove "data" under "plot" because it should be present in layers if its significant, if not then it adds unnecessary x value
+
+GoI<- c("RBM3", "CIRBP", "RTN3", "SMYD5", "SP1")
+
+
+FINAL_gene_plots_NOTKD<- gene_plots_tofilter2
+
+
+
+for (gene_of_interest in GoI) {
+  FINAL_gene_plots_NOTKD[[gene_of_interest]]$plot$data <-  FINAL_gene_plots_NOTKD[[gene_of_interest]]$plot$layers[[1]]$data
+}
+```
+
+All plots scaled the same
+```{r}
+FINAL_gene_plots_NOTKD_modified<- FINAL_gene_plots_NOTKD
+
+FINAL_gene_plots_NOTKD_modified[["RBM3"]]$plot<-FINAL_gene_plots_NOTKD_modified[["RBM3"]]$plot+scale_y_continuous(name="Log2Fold breyting", limits=c(-2, 2))
+
+FINAL_gene_plots_NOTKD_modified[["SP1"]]$plot<-FINAL_gene_plots_NOTKD_modified[["SP1"]]$plot+scale_y_continuous(name="Log2Fold breyting", limits=c(-2, 2))
+
+FINAL_gene_plots_NOTKD_modified[["SMYD5"]]$plot<-FINAL_gene_plots_NOTKD_modified[["SMYD5"]]$plot+scale_y_continuous(name="Log2Fold breyting", limits=c(-2, 2))
+
+FINAL_gene_plots_NOTKD_modified[["RTN3"]]$plot<-FINAL_gene_plots_NOTKD_modified[["RTN3"]]$plot+scale_y_continuous(name="Log2Fold breyting", limits=c(-2, 2))
+
+FINAL_gene_plots_NOTKD_modified[["CIRBP"]]$plot<-FINAL_gene_plots_NOTKD_modified[["CIRBP"]]$plot+scale_y_continuous(name="Log2Fold breyting", limits=c(-2, 2))
+
+
+
+```
+
+
+
+How many series show a DEGs given that there was a significant KO/KD
+
+```{r}
+
+How_many_DEGs_series <- list()
+
+for (i in seq_along(FINAL_RESULT_KD)) {
+  if (sum(FINAL_RESULT_KD[[i]]$padj < 0.1) >= 2) {
+    series_name <- names(FINAL_RESULT_KD)[i]  # Get the name of the series
+    How_many_DEGs_series[[series_name]] <- sum(FINAL_RESULT_KD[[i]]$padj < 0.1)  # Store the count of DEGs
+  }
+}
+
+```
+
+Let's make a heatmap
+```{r}
+#Let's start by finding the mean log2fold change for each target gene from each KO/KD of the genes of interest
+
+log2SMYD5 <- list()
+
+for (i in 1:43) {
+  log2SMYD5[[i]] <- list(
+    targetgene = FINAL_gene_plots_NOTKD$SMYD5$plot$layers[[i]]$data$TargetGene,
+    log2foldchange = FINAL_gene_plots_NOTKD$SMYD5$plot$layers[[i]]$data$Log2FoldChange
+  )
+}
+
+
+
+# Initialize an empty list to store log2foldchange values for each target gene
+SMYD5log2foldchange_grouped <- list()
+
+# Iterate over each element of the log2RBM3 list
+for (i in 1:length(log2SMYD5)) {
+  # Extract the target gene name and log2foldchange values
+  target_gene <- log2SMYD5[[i]]$targetgene
+  log2foldchange <- log2SMYD5[[i]]$log2foldchange
+  
+  # Check if the target gene already exists in the list
+  if (target_gene %in% names(SMYD5log2foldchange_grouped)) {
+    # If it exists, append the log2foldchange values to the existing list
+    SMYD5log2foldchange_grouped[[target_gene]] <- c(SMYD5log2foldchange_grouped[[target_gene]], log2foldchange)
+  } else {
+    # If it doesn't exist, create a new entry in the list with the log2foldchange values
+    SMYD5log2foldchange_grouped[[target_gene]] <- log2foldchange
+  }
+}
+
+
+
+
+# Initialize an empty list to store the mean log2foldchange for each target gene
+SMYD5mean_log2foldchange <- list()
+
+# Iterate over each target gene in the grouped log2foldchange list
+for (gene in names(SMYD5log2foldchange_grouped)) {
+  # Calculate the mean log2foldchange for the current target gene
+  gene_mean <- mean(SMYD5log2foldchange_grouped[[gene]])
+  
+  # Store the mean log2foldchange in the result list
+  SMYD5mean_log2foldchange[[gene]] <- gene_mean
+}
+
+```
+
+```{r}
+log2RBM3 <- list()
+
+for (i in 1:42) {
+  log2RBM3[[i]] <- list(
+    targetgene = FINAL_gene_plots_NOTKD$RBM3$plot$layers[[i]]$data$TargetGene,
+    log2foldchange = FINAL_gene_plots_NOTKD$RBM3$plot$layers[[i]]$data$Log2FoldChange
+  )
+}
+
+
+
+# Initialize an empty list to store log2foldchange values for each target gene
+RBM3log2foldchange_grouped <- list()
+
+# Iterate over each element of the log2RBM3 list
+for (i in 1:length(log2RBM3)) {
+  # Extract the target gene name and log2foldchange values
+  target_gene <- log2RBM3[[i]]$targetgene
+  log2foldchange <- log2RBM3[[i]]$log2foldchange
+  
+  # Check if the target gene already exists in the list
+  if (target_gene %in% names(RBM3log2foldchange_grouped)) {
+    # If it exists, append the log2foldchange values to the existing list
+    RBM3log2foldchange_grouped[[target_gene]] <- c(RBM3log2foldchange_grouped[[target_gene]], log2foldchange)
+  } else {
+    # If it doesn't exist, create a new entry in the list with the log2foldchange values
+    RBM3log2foldchange_grouped[[target_gene]] <- log2foldchange
+  }
+}
+
+
+
+
+# Initialize an empty list to store the mean log2foldchange for each target gene
+RBM3mean_log2foldchange <- list()
+
+# Iterate over each target gene in the grouped log2foldchange list
+for (gene in names(RBM3log2foldchange_grouped)) {
+  # Calculate the mean log2foldchange for the current target gene
+  gene_mean <- mean(RBM3log2foldchange_grouped[[gene]])
+  
+  # Store the mean log2foldchange in the result list
+  RBM3mean_log2foldchange[[gene]] <- gene_mean
+}
+```
+
+
+```{r}
+log2RTN3 <- list()
+
+for (i in 1:43) {
+  log2RTN3[[i]] <- list(
+    targetgene = FINAL_gene_plots_NOTKD$RTN3$plot$layers[[i]]$data$TargetGene,
+    log2foldchange = FINAL_gene_plots_NOTKD$RTN3$plot$layers[[i]]$data$Log2FoldChange
+  )
+}
+
+
+
+# Initialize an empty list to store log2foldchange values for each target gene
+RTN3log2foldchange_grouped <- list()
+
+# Iterate over each element of the log2RBM3 list
+for (i in 1:length(log2RTN3)) {
+  # Extract the target gene name and log2foldchange values
+  target_gene <- log2RTN3[[i]]$targetgene
+  log2foldchange <- log2RTN3[[i]]$log2foldchange
+  
+  # Check if the target gene already exists in the list
+  if (target_gene %in% names(RTN3log2foldchange_grouped)) {
+    # If it exists, append the log2foldchange values to the existing list
+    RTN3log2foldchange_grouped[[target_gene]] <- c(RTN3log2foldchange_grouped[[target_gene]], log2foldchange)
+  } else {
+    # If it doesn't exist, create a new entry in the list with the log2foldchange values
+    RTN3log2foldchange_grouped[[target_gene]] <- log2foldchange
+  }
+}
+
+
+
+
+# Initialize an empty list to store the mean log2foldchange for each target gene
+RTN3mean_log2foldchange <- list()
+
+# Iterate over each target gene in the grouped log2foldchange list
+for (gene in names(RTN3log2foldchange_grouped)) {
+  # Calculate the mean log2foldchange for the current target gene
+  gene_mean <- mean(RTN3log2foldchange_grouped[[gene]])
+  
+  # Store the mean log2foldchange in the result list
+  RTN3mean_log2foldchange[[gene]] <- gene_mean
+}
+
+```
+
+```{r}
+log2CIRBP <- list()
+
+for (i in 1:46) {
+  log2CIRBP[[i]] <- list(
+    targetgene = FINAL_gene_plots_NOTKD$CIRBP$plot$layers[[i]]$data$TargetGene,
+    log2foldchange = FINAL_gene_plots_NOTKD$CIRBP$plot$layers[[i]]$data$Log2FoldChange
+  )
+}
+
+
+
+# Initialize an empty list to store log2foldchange values for each target gene
+CIRBPlog2foldchange_grouped <- list()
+
+# Iterate over each element of the log2RBM3 list
+for (i in 1:length(log2CIRBP)) {
+  # Extract the target gene name and log2foldchange values
+  target_gene <- log2CIRBP[[i]]$targetgene
+  log2foldchange <- log2CIRBP[[i]]$log2foldchange
+  
+  # Check if the target gene already exists in the list
+  if (target_gene %in% names(CIRBPlog2foldchange_grouped)) {
+    # If it exists, append the log2foldchange values to the existing list
+    CIRBPlog2foldchange_grouped[[target_gene]] <- c(CIRBPlog2foldchange_grouped[[target_gene]], log2foldchange)
+  } else {
+    # If it doesn't exist, create a new entry in the list with the log2foldchange values
+    CIRBPlog2foldchange_grouped[[target_gene]] <- log2foldchange
+  }
+}
+
+
+
+
+# Initialize an empty list to store the mean log2foldchange for each target gene
+CIRBPmean_log2foldchange <- list()
+
+# Iterate over each target gene in the grouped log2foldchange list
+for (gene in names(CIRBPlog2foldchange_grouped)) {
+  # Calculate the mean log2foldchange for the current target gene
+  gene_mean <- mean(CIRBPlog2foldchange_grouped[[gene]])
+  
+  # Store the mean log2foldchange in the result list
+  CIRBPmean_log2foldchange[[gene]] <- gene_mean
+}
+
+```
+
+
+```{r}
+log2SP1 <- list()
+
+for (i in 1:31) {
+  log2SP1[[i]] <- list(
+    targetgene = FINAL_gene_plots_NOTKD$SP1$plot$layers[[i]]$data$TargetGene,
+    log2foldchange = FINAL_gene_plots_NOTKD$SP1$plot$layers[[i]]$data$Log2FoldChange
+  )
+}
+
+
+
+# Initialize an empty list to store log2foldchange values for each target gene
+SP1log2foldchange_grouped <- list()
+
+# Iterate over each element of the log2RBM3 list
+for (i in 1:length(log2SP1)) {
+  # Extract the target gene name and log2foldchange values
+  target_gene <- log2SP1[[i]]$targetgene
+  log2foldchange <- log2SP1[[i]]$log2foldchange
+  
+  # Check if the target gene already exists in the list
+  if (target_gene %in% names(SP1log2foldchange_grouped)) {
+    # If it exists, append the log2foldchange values to the existing list
+    SP1log2foldchange_grouped[[target_gene]] <- c(SP1log2foldchange_grouped[[target_gene]], log2foldchange)
+  } else {
+    # If it doesn't exist, create a new entry in the list with the log2foldchange values
+    SP1log2foldchange_grouped[[target_gene]] <- log2foldchange
+  }
+}
+
+
+
+
+# Initialize an empty list to store the mean log2foldchange for each target gene
+SP1mean_log2foldchange <- list()
+
+# Iterate over each target gene in the grouped log2foldchange list
+for (gene in names(SP1log2foldchange_grouped)) {
+  # Calculate the mean log2foldchange for the current target gene
+  gene_mean <- mean(SP1log2foldchange_grouped[[gene]])
+  
+  # Store the mean log2foldchange in the result list
+  SP1mean_log2foldchange[[gene]] <- gene_mean
+}
+
+
+
+```
+
+
+```{r}
+# Define all gene lists
+gene_lists <- list(
+  RBM3 = RBM3mean_log2foldchange,
+  CIRBP = CIRBPmean_log2foldchange,
+  SMYD5 = SMYD5mean_log2foldchange,
+  SP1 = SP1mean_log2foldchange,
+  RTN3 = RTN3mean_log2foldchange
+)
+
+#all genes
+genenames <- list()
+for (i in seq_along(gene_lists)) {
+  genenames <- c(genenames, names(gene_lists[[i]]))
+}
+
+#only unique names
+unique_genenames<-list()
+unique_genenames<-unique(genenames)
+
+
+for (i in unique_genenames){
+  for (gene in names(gene_lists)){gene_lists[[gene]]}
+  if (i gene_lists)
+  }
+}
+
+
+for (gene in names(gene_lists)) {
+  if (length(gene_lists[[gene]]) < max_length) {
+    gene_lists[[gene]] <- c(gene_lists[[gene]], rep(0, max_length - length(gene_lists[[gene]])))
+  }
+}
+
+# Create the dataframe
+meanlog2foldchange <- data.frame(gene_lists)
+rownames(meanlog2foldchange) <- names(RBM3mean_log2foldchange)  # Use the gene names as row names
+
+# Print the dataframe
+print(meanlog2foldchange)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Plot the histograms
+```{r}
+
+
+GSE_for_histo <- list()
+
+for (name in names(filtered_gene_pvalues)) {
+  for (gene in names(filtered_gene_pvalues[[name]])) {
+    for (i in seq_along(gene_plots_tofilter2[[name]]$exp_data)) { 
+      if (gene_plots_tofilter2[[name]]$exp_data[[i]]$targetgene[1] == gene) {
+        GSE_for_histo[[length(GSE_for_histo) + 1]] <- names(gene_plots_tofilter2[[name]]$exp_data)[i]
+      }
+    }
+  }
+}
+
+
+GSE<-GSE_for_histo[[2]]
+
+# Plot the histogram
+plot(deseq_result[[GSE]]$p_histogram , main = paste("Histogram of p-values for", GSE))
+
+```
+
+
+
+
+
